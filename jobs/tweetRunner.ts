@@ -29,6 +29,7 @@ export async function runTweetRunner(areaIds?: string[]) {
       scope: p.scope,
       sourceTag,
     });
+    console.log(`[tweet][${aiRes.meta.used}] area=${aiRes.meta.area} scope=${aiRes.meta.scope} chars=${aiRes.textEn.length}`);
 
     // Build hashtags
     const hyd = isHyderabad(area.id);
