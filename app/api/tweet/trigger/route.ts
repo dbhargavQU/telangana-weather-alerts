@@ -8,9 +8,11 @@ let lastTriggerAtMs: number | null = null;
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
   const areaId: string | undefined = body?.areaId;
+  const force: boolean = body?.force === true;
+  const debug: boolean = body?.debug === true;
   // Try Redis rate-limit; fall back to in-memory if Redis unavailable
   try {
-    const set = await redis.set(LOCK_KEY, String(Date.now()), 'NX', 'EX', 60);
+    const set = await redis.set(LOCK_KEY, String(Date.now()), 'EX', 60, 'NX');
     if (set !== 'OK') {
       const ttl = await redis.ttl(LOCK_KEY);
       return NextResponse.json({ ok: false, error: `Try again in ${ttl}s` });
@@ -23,7 +25,7 @@ export async function POST(req: NextRequest) {
     }
     lastTriggerAtMs = now;
   }
-  const result = await runTweetRunner(areaId ? [areaId] : undefined);
+  const result = await runTweetRunner({ areaIds: areaId ? [areaId] : undefined, force, debug });
   return NextResponse.json({ ok: true, ...result });
 }
 

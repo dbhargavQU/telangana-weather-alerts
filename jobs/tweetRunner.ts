@@ -5,7 +5,11 @@ import { postTweet } from '@/lib/xClient';
 import { formatTweetWithAI } from '@/lib/tweetFormat';
 import { isHyderabad, makeHash } from '@/lib/tweetRules';
 
-export async function runTweetRunner(areaIds?: string[]) {
+export async function runTweetRunner(options?: { areaIds?: string[]; force?: boolean; debug?: boolean }) {
+  const areaIds = options?.areaIds;
+  const isForce = options?.force === true;
+  const isDebug = options?.debug === true;
+  const debugReasons: string[] = [];
   const picks = await decideTweets(areaIds);
   let posted = 0;
   const MAX_POSTS_PER_CYCLE = 6;
@@ -57,10 +61,12 @@ export async function runTweetRunner(areaIds?: string[]) {
 
     // WEEK scheduling: only at 08:10 IST, once per day per area
     if (p.scope === 'week') {
-      if (!(istNow.hour === 8 && istNow.minute === 10)) continue;
+      if (!(istNow.hour === 8 && istNow.minute === 10)) {
+        if (!isForce) { if (isDebug) debugReasons.push(`skip: week gate not 08:10 area=${area.id}`); continue; }
+      }
       const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
       const already = await (prisma as any).tweetLog.findFirst({ where: { areaId: area.id, scope: 'week', createdAt: { gte: since } } });
-      if (already) continue;
+      if (already) { if (!isForce) { if (isDebug) debugReasons.push(`skip: week already today area=${area.id}`); continue; } }
     }
 
     // Thresholds
@@ -70,8 +76,8 @@ export async function runTweetRunner(areaIds?: string[]) {
 
     const zeroNow = nowBlk && Number(nowBlk.mmhLow ?? 0) === 0 && Number(nowBlk.mmhHigh ?? 0) === 0;
     const zeroToday = todayBlk && Number(todayBlk.threeMmLow ?? 0) === 0 && Number(todayBlk.threeMmHigh ?? 0) === 0;
-    if (p.scope === 'now' && zeroNow) continue;
-    if (p.scope === 'today' && zeroToday) continue;
+    if (p.scope === 'now' && zeroNow) { if (!isForce) { if (isDebug) debugReasons.push(`skip: zero now range area=${area.id}`); continue; } }
+    if (p.scope === 'today' && zeroToday) { if (!isForce) { if (isDebug) debugReasons.push(`skip: zero today range area=${area.id}`); continue; } }
 
     let pass = false;
     if (p.scope === 'now') {
@@ -94,7 +100,8 @@ export async function runTweetRunner(areaIds?: string[]) {
     } else if (p.scope === 'week') {
       pass = Array.isArray(weekBlk) && weekBlk.some((d: any) => Number(d.mmHigh ?? 0) >= 20 && Number(d.maxProb ?? 0) >= 80);
     }
-    if (!pass) continue;
+    if (isForce) pass = true;
+    if (!pass) { if (isDebug) debugReasons.push(`skip: thresholds scope=${p.scope} area=${area.id}`); continue; }
 
     // Score
     const scopeScore = p.scope === 'now' ? 60 : p.scope === 'today' ? 30 : 0;
@@ -120,7 +127,7 @@ export async function runTweetRunner(areaIds?: string[]) {
     if (approved.length >= MAX_POSTS_PER_CYCLE) break;
     const current = groupCounts.get(c.groupKey) || 0;
     const groupLimit = c.groupKey === 'hyd-metro' ? (c.severeHyd ? 2 : 1) : 1;
-    if (current >= groupLimit) continue;
+    if (current >= groupLimit) { if (!isForce) { if (isDebug) debugReasons.push(`skip: group cap ${c.groupKey}`); continue; } }
 
     // 180-min cooldown unless escalation
     const last = await (prisma as any).tweetLog.findFirst({ where: { areaId: c.area.id }, orderBy: { createdAt: 'desc' } });
@@ -144,7 +151,7 @@ export async function runTweetRunner(areaIds?: string[]) {
             escalated = true;
           }
         }
-        if (!escalated) continue;
+        if (!escalated) { if (!isForce) { if (isDebug) debugReasons.push(`skip: cooldown <180m area=${c.area.id}`); continue; } }
       }
     }
 
@@ -153,8 +160,8 @@ export async function runTweetRunner(areaIds?: string[]) {
   }
 
   for (const item of approved) {
-    if (posted >= MAX_POSTS_PER_CYCLE) break;
-    if (perHourCount >= MAX_POSTS_PER_HOUR) break;
+    if (!isForce && posted >= MAX_POSTS_PER_CYCLE) break;
+    if (!isForce && perHourCount >= MAX_POSTS_PER_HOUR) { if (isDebug) debugReasons.push('stop: per-hour cap reached'); break; }
     const { p, area, payload } = item;
 
     // Compute source tag
@@ -222,7 +229,7 @@ export async function runTweetRunner(areaIds?: string[]) {
       },
     });
   }
-  return { posted };
+  return isDebug ? { posted, debugReasons } : { posted };
 }
 
 
