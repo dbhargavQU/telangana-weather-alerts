@@ -2,47 +2,85 @@ import { decideTweets } from '@/jobs/tweetDecider';
 import { prisma } from '@/lib/db';
 import { config } from '@/lib/config';
 import { postTweet } from '@/lib/xClient';
-import { formatTweetBalajiStyle, formatTweetFallback } from '@/lib/tweetFormat';
+import { formatTweetWithAI } from '@/lib/tweetFormat';
+import { isHyderabad, makeHash } from '@/lib/tweetRules';
 
 export async function runTweetRunner(areaIds?: string[]) {
-  if (!config.tweetEnable) return { posted: 0, skipped: 'disabled' };
   const picks = await decideTweets(areaIds);
   let posted = 0;
   for (const p of picks) {
-    const a = await prisma.area.findUnique({ where: { id: p.areaId } });
-    if (!a) continue;
-    const res = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/api/areas/${a.id}`, { cache: 'no-store' });
-    const data = await res.json();
-    const isHyd = /Hyderabad/i.test(a.name);
-    // Build input text for AI
-    const input = [
-      `AREA: ${a.name}`,
-      `WHEN_LOCAL: ${p.windowLabel || data?.today?.windowLabel || ''} IST`,
-      `NOW: eta=${data?.now?.radarEtaMin ? `${data.now.radarEtaMin.from}-${data.now.radarEtaMin.to}` : 'none'}; mmh=${data?.now ? `${data.now.mmhLow}-${data.now.mmhHigh}` : 'none'}; thunder=${data?.now?.thunderFlag ? 'true' : 'false'}`,
-      `TODAY: total3h=${data?.today ? `${data.today.threeMmLow}-${data.today.threeMmHigh} mm` : 'none'}; intensity=${data?.today?.intensityWordToday || 'none'}; prob=${data?.today?.maxProb12h ?? 0}%`,
-      `WEEK_TOP2: ${(data?.week || []).slice(0,2).map((d:any) => `${new Date(d.date).toLocaleDateString('en-IN',{timeZone:'Asia/Kolkata',weekday:'short'})} ${d.mmLow}-${d.mmHigh} mm`).join(', ')}`,
-      'INSTRUCTIONS: respond in json. If NOW strong, lead with NOW; else TODAY. Use exact numbers; one short safety tip only if heavy/very heavy. Hashtags: #TelanganaWeather and #HyderabadRains only for Hyderabad. End with source tag. Keep <= 280 chars.'
-    ].join('\n');
+    const area = await prisma.area.findUnique({ where: { id: p.areaId } });
+    if (!area) continue;
+    const res = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/api/areas/${area.id}`, { cache: 'no-store' });
+    const payload = await res.json();
 
-    const ai = await formatTweetBalajiStyle(input, isHyd);
-    const sourceTag = data?.now?.radarEtaMin?.from != null ? 'Model+Radar' : 'Model';
-    const fallback = formatTweetFallback({
-      area: a.name,
+    // Dedupe + budget via redis keys already done in decideTweets allowTweet()
+    // Compute source tag
+    const hasRadarEta = !!payload?.now?.radarEtaMin && payload.now.radarEtaMin.from != null;
+    const hasRadarIntensity = (payload?.observation?.radarIntensity || 'none') !== 'none';
+    const sourceTag = hasRadarEta || hasRadarIntensity ? 'Model+Radar' : 'Model';
+
+    // Call AI formatter
+    const aiRes = await formatTweetWithAI({
+      area: area.name,
+      now: payload.now,
+      today: payload.today,
+      week: payload.week,
       scope: p.scope,
-      intensity: (data?.today?.intensityWordToday || data?.now?.intensityWordNow || 'moderate'),
-      etaFrom: data?.now?.radarEtaMin?.from,
-      etaTo: data?.now?.radarEtaMin?.to,
-      mmhLow: data?.now?.mmhLow, mmhHigh: data?.now?.mmhHigh,
-      windowLabel: p.windowLabel || data?.today?.windowLabel,
-      threeLow: data?.today?.threeMmLow, threeHigh: data?.today?.threeMmHigh,
-      source: sourceTag as any,
+      sourceTag,
     });
-    const finalText = `${(ai?.textEn || fallback.textEn)}\n${(ai?.textTe || fallback.textTe)}\n${(ai?.hashtags || fallback.hashtags).join(' ')} ${sourceTag ? `(${sourceTag})` : ''}`.trim().slice(0, 280);
-    const postedRes = await postTweet(finalText);
-    if (postedRes) {
-      posted += 1;
-      await prisma.tweetLog.create({ data: { areaId: a.id, scope: p.scope, bucket: p.bucket, windowLabel: p.windowLabel || null, hash: 'unused-hash', tweetId: postedRes.id } as any });
+
+    // Build hashtags
+    const hyd = isHyderabad(area.id);
+    const hashtags = ['#TelanganaWeather', hyd ? '#HyderabadRains' : null].filter(Boolean).join(' ');
+
+    // Assemble text with 280 cap rules
+    let text = `${aiRes.textEn}\n${aiRes.textTe}\n${hashtags}`.trim();
+    if (text.length > 280) text = `${aiRes.textEn}\n${aiRes.textTe}`.trim();
+    if (text.length > 280) text = `${aiRes.textEn}`.trim();
+    if (text.length > 280) text = text.replace(/\bminutes\b/gi, 'm').replace(/\bminute\b/gi, 'm').replace(/\bpm\b/gi, 'p');
+    if (text.length > 280) text = text.slice(0, 280);
+
+    const hash = makeHash(area.id, p.scope, p.bucket, p.windowLabel);
+
+    // Post or dry-log based on config
+    const canPost = config.tweetEnable && !!config.xApiKey && !!config.xApiSecret && !!config.xAccessToken && !!config.xAccessSecret;
+    if (!canPost) {
+      console.log(`[tweet][dry] area=${area.id} scope=${p.scope} chars=${text.length}`);
+      console.log(text);
+      await (prisma as any).tweetLog.create({
+        data: {
+          areaId: area.id,
+          scope: p.scope,
+          bucket: p.bucket,
+          windowLabel: p.windowLabel || null,
+          hash,
+          tweetId: null,
+        },
+      });
+      continue;
     }
+
+    // Thread replies within the same local day per area
+    const ist = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' })
+      .format(new Date());
+    const dayKey = `${area.id}:${ist}`;
+    const last = await (prisma as any).tweetLog.findFirst({ where: { areaId: area.id }, orderBy: { createdAt: 'desc' } });
+    const replyToId = last?.tweetId || undefined;
+
+    const postedRes = await postTweet({ text, replyToId });
+    const tweetId = postedRes?.tweetId || null;
+    if (tweetId) posted += 1;
+    await (prisma as any).tweetLog.create({
+      data: {
+        areaId: area.id,
+        scope: p.scope,
+        bucket: p.bucket,
+        windowLabel: p.windowLabel || null,
+        hash,
+        tweetId,
+      },
+    });
   }
   return { posted };
 }

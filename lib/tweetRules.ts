@@ -45,4 +45,17 @@ export function makeHash(areaId: string, scope: Scope, bucket: string, windowLab
   return h.digest('hex');
 }
 
+export function isHyderabad(areaId: string): boolean {
+  return areaId === 'dist-hyderabad' || areaId.startsWith('nbhd-');
+}
+
+export function sourceTagFor(payload: {
+  now?: { radarEtaMin?: { from: number | null; to: number | null } | null } | null;
+  observation?: { radarIntensity?: string | null } | null;
+}): 'Model' | 'Model+Radar' {
+  const hasEta = !!payload?.now?.radarEtaMin && payload.now.radarEtaMin!.from != null;
+  const hasRadarIntensity = (payload?.observation?.radarIntensity || 'none') !== 'none';
+  return hasEta || hasRadarIntensity ? 'Model+Radar' : 'Model';
+}
+
 
