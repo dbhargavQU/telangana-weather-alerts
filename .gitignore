@@ -1,2 +1,48 @@
+# Node
 node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Mac
+.DS_Store
+
+# Env
 .env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.test
+
+# Next.js
+.next/
+out/
+.vercel/
+.turbo/
+
+# TypeScript
+dist/
+*.tsbuildinfo
+
+# Coverage / Testing
+coverage/
+
+# Logs
+logs
+*.log
+*.log.*
+
+# Editors / IDE
+.vscode/
+.idea/
+
+# Prisma (local sqlite files, if any)
+prisma/*.db
+prisma/*.sqlite
+prisma/*.db-journal
+
+# Caches / Temp
+.cache/
+.tmp/
