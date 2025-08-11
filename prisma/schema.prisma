@@ -1,0 +1,127 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AreaType {
+  district
+  neighbourhood
+}
+
+enum Severity {
+  info
+  medium
+  high
+}
+
+model Area {
+  id        String   @id @default(uuid())
+  name      String
+  type      AreaType
+  polygon   Json
+  centroidLat Float?
+  centroidLng Float?
+  polyQuality String? @default("bbox")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  observations Observation[]
+  alerts       Alert[]
+  forecasts    ForecastDaily[]
+  tweetLogs    TweetLog[]
+
+  @@index([type, name])
+}
+
+model Observation {
+  id           String   @id @default(uuid())
+  areaId       String
+  area         Area     @relation(fields: [areaId], references: [id], onDelete: Cascade)
+  observedAt   DateTime @default(now())
+  // Open-Meteo
+  precipHour   Float?   // mm/hr
+  probability  Int?     // %
+  intensityClass String? // none|light|moderate|heavy
+  // Radar
+  radarEtaMin   Int?
+  radarDuration Int?
+  radarIntensity String? // none|light|moderate|heavy
+  // Legacy fields (optional)
+  rain15       Float?
+  rain60       Float?
+  maxDbz       Float?
+  etaMin       Int?
+  durationMin  Int?
+  thunderProb  Float?
+  floodProb    Float?
+  sources      String[]
+  staleSources String[]  @default([])
+  // Later today outlook (Open-Meteo)
+  nowProb        Int?
+  maxProb12h     Int?
+  sumPrecip12h   Float?
+  threeHourTotalMm Float?
+  peakHourLocal  DateTime?
+
+  alerts       Alert[]
+
+  @@index([areaId, observedAt])
+}
+
+model Alert {
+  id          String   @id @default(uuid())
+  areaId      String
+  area        Area     @relation(fields: [areaId], references: [id], onDelete: Cascade)
+  observationId String?
+  observation   Observation? @relation(fields: [observationId], references: [id])
+  scope       String   @default("now") // now | today
+  issuedAt    DateTime @default(now())
+  windowStart DateTime
+  windowEnd   DateTime
+  severity    Severity
+  confidence  Float
+  textEn      String
+  textTe      String
+  sources     String[]
+
+  @@index([areaId, issuedAt])
+}
+
+model ForecastDaily {
+  id          String   @id @default(uuid())
+  areaId      String
+  area        Area     @relation(fields: [areaId], references: [id], onDelete: Cascade)
+  date        DateTime
+  precipitationSum        Float?
+  precipitationProbabilityMax Int?
+  temperatureMax          Float?
+  temperatureMin          Float?
+  textEn      String?
+  textTe      String?
+  confidence  Float?
+  createdAt   DateTime @default(now())
+
+  @@unique([areaId, date])
+  @@index([areaId, date])
+}
+
+model TweetLog {
+  id         String   @id @default(uuid())
+  areaId     String
+  area       Area     @relation(fields: [areaId], references: [id], onDelete: Cascade)
+  scope      String
+  bucket     String
+  windowLabel String?
+  hash       String   @unique
+  tweetId    String?
+  createdAt  DateTime @default(now())
+  
+
+  @@index([areaId, scope, createdAt])
+}
+
+
